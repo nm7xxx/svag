@@ -259,7 +259,7 @@ def make_transform(
             (ww, hh),
             interpolation=cv2.INTER_LANCZOS4
         )
-        return np.array(img)
+        return img
 
     def center_crop(width, height, img):
         crop = np.min(img.shape[:2])
