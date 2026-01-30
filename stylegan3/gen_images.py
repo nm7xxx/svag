@@ -10,6 +10,7 @@
 
 import os
 import re
+from email.policy import default
 from typing import List, Optional, Tuple, Union
 
 import click
@@ -77,6 +78,7 @@ def make_transform(translate: Tuple[float,float], angle: float):
 @click.option('--translate', help='Translate XY-coordinate (e.g. \'0.3,1\')', type=parse_vec2, default='0,0', show_default=True, metavar='VEC2')
 @click.option('--rotate', help='Rotation angle in degrees', type=float, default=0, show_default=True, metavar='ANGLE')
 @click.option('--outdir', help='Where to save the output images', type=str, required=True, metavar='DIR')
+@click.option('--bit-depth', help='Bits per pixel',type=click.Choice(['8', '16']), default='8', show_default=True, metavar='BIT')
 def generate_images(
     network_pkl: str,
     seeds: List[int],
@@ -85,7 +87,8 @@ def generate_images(
     outdir: str,
     translate: Tuple[float,float],
     rotate: float,
-    class_idx: Optional[int]
+    class_idx: Optional[int],
+    bit_depth: str,
 ):
     """Generate images using pretrained network pickle.
 
@@ -133,8 +136,20 @@ def generate_images(
             G.synthesis.input.transform.copy_(torch.from_numpy(m))
 
         img = G(z, label, truncation_psi=truncation_psi, noise_mode=noise_mode)
-        img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-        PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/seed{seed:04d}.png')
+        img = img.permute(0, 2, 3, 1)
+        if bit_depth == '8':
+            img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/seed{seed:04d}.png')
+        else:
+            img = (img * 32767.5 + 32768).clamp(0, 65535).to(torch.uint16)
+
+            import tifffile
+            tifffile.imwrite(
+                f'{outdir}/seed{seed:04d}.tiff',
+                img[0].cpu().numpy(),
+                photometric='rgb',
+                compression=None
+            )
 
 
 #----------------------------------------------------------------------------

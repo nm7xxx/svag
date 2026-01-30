@@ -24,7 +24,10 @@ from typing import Callable, Optional, Tuple, Union
 import click
 import numpy as np
 import PIL.Image
+import cv2
 from tqdm import tqdm
+
+SUPPORT_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tif', '.tiff'}
 
 #----------------------------------------------------------------------------
 
@@ -62,7 +65,7 @@ def file_ext(name: Union[str, Path]) -> str:
 
 def is_image_ext(fname: Union[str, Path]) -> bool:
     ext = file_ext(fname).lower()
-    return f'.{ext}' in PIL.Image.EXTENSION # type: ignore
+    return f'.{ext}' in SUPPORT_EXTENSIONS # type: ignore
 
 #----------------------------------------------------------------------------
 
@@ -86,7 +89,18 @@ def open_image_folder(source_dir, *, max_images: Optional[int]):
         for idx, fname in enumerate(input_images):
             arch_fname = os.path.relpath(fname, source_dir)
             arch_fname = arch_fname.replace('\\', '/')
-            img = np.array(PIL.Image.open(fname))
+
+            # img = np.array(PIL.Image.open(fname))
+            img = cv2.imread(fname, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                raise IOError(f'Failed to load image: {fname}')
+            if img.ndim == 2:
+                img = img[:, :, np.newaxis]
+            if img.shape[2] == 1:
+                img = np.repeat(img, 3, axis=2)   # 强制复制为三通道图像
+            if img.shape[2] == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)   # BGR=>RGB
+
             yield dict(img=img, label=labels.get(arch_fname))
             if idx >= max_idx-1:
                 break
@@ -114,8 +128,21 @@ def open_image_zip(source, *, max_images: Optional[int]):
         with zipfile.ZipFile(source, mode='r') as z:
             for idx, fname in enumerate(input_images):
                 with z.open(fname, 'r') as file:
-                    img = PIL.Image.open(file) # type: ignore
-                    img = np.array(img)
+                    # img = PIL.Image.open(file) # type: ignore
+                    # img = np.array(img)
+                    data = file.read()
+                buf = np.frombuffer(data, dtype=np.uint8)
+                img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    raise IOError(f'Failed to decode image: {fname}')
+                if img.ndim == 2:
+                    img = img[:, :, np.newaxis]
+                if img.shape[2] == 1:
+                    img = np.repeat(img, 3, axis=2)
+                if img.shape[2] == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                if img.dtype not in (np.uint8, np.uint16):
+                    raise ValueError(f'Unsupported dtype {img.dtype} for {fname}')
                 yield dict(img=img, label=labels.get(fname))
                 if idx >= max_idx-1:
                     break
@@ -223,18 +250,28 @@ def make_transform(
         h = img.shape[0]
         if width == w and height == h:
             return img
-        img = PIL.Image.fromarray(img)
+        # img = PIL.Image.fromarray(img)
         ww = width if width is not None else w
         hh = height if height is not None else h
-        img = img.resize((ww, hh), PIL.Image.LANCZOS)
+        # img = img.resize((ww, hh), PIL.Image.LANCZOS)
+        img = cv2.resize(
+            img,
+            (ww, hh),
+            interpolation=cv2.INTER_LANCZOS4
+        )
         return np.array(img)
 
     def center_crop(width, height, img):
         crop = np.min(img.shape[:2])
         img = img[(img.shape[0] - crop) // 2 : (img.shape[0] + crop) // 2, (img.shape[1] - crop) // 2 : (img.shape[1] + crop) // 2]
-        img = PIL.Image.fromarray(img, 'RGB')
-        img = img.resize((width, height), PIL.Image.LANCZOS)
-        return np.array(img)
+        # img = PIL.Image.fromarray(img, 'RGB')
+        # img = img.resize((width, height), PIL.Image.LANCZOS)
+        img = cv2.resize(
+            img,
+            (width, height),
+            interpolation=cv2.INTER_LANCZOS4
+        )
+        return img
 
     def center_crop_wide(width, height, img):
         ch = int(np.round(width * img.shape[0] / img.shape[1]))
@@ -242,11 +279,16 @@ def make_transform(
             return None
 
         img = img[(img.shape[0] - ch) // 2 : (img.shape[0] + ch) // 2]
-        img = PIL.Image.fromarray(img, 'RGB')
-        img = img.resize((width, height), PIL.Image.LANCZOS)
-        img = np.array(img)
+        # img = PIL.Image.fromarray(img, 'RGB')
+        # img = img.resize((width, height), PIL.Image.LANCZOS)
+        # img = np.array(img)
+        img = cv2.resize(
+            img,
+            (width, height),
+            interpolation=cv2.INTER_LANCZOS4
+        )
 
-        canvas = np.zeros([width, width, 3], dtype=np.uint8)
+        canvas = np.zeros([width, width, img.shape[2]], dtype=img.dtype)
         canvas[(width - height) // 2 : (width + height) // 2, :] = img
         return canvas
 
@@ -390,7 +432,7 @@ def convert_dataset(
         --transform=center-crop-wide --resolution=512x384
     """
 
-    PIL.Image.init() # type: ignore
+    # PIL.Image.init() # type: ignore
 
     if dest == '':
         ctx.fail('--dest output filename or directory must not be an empty string')
@@ -418,6 +460,8 @@ def convert_dataset(
         # Error check to require uniform image attributes across
         # the whole dataset.
         channels = img.shape[2] if img.ndim == 3 else 1
+        assert img.dtype in (np.uint8, np.uint16)
+        assert channels in (1, 3)
         cur_image_attrs = {
             'width': img.shape[1],
             'height': img.shape[0],
@@ -438,10 +482,38 @@ def convert_dataset(
             error(f'Image {archive_fname} attributes must be equal across all images of the dataset.  Got:\n' + '\n'.join(err))
 
         # Save the image as an uncompressed PNG.
-        img = PIL.Image.fromarray(img, { 1: 'L', 3: 'RGB' }[channels])
-        image_bits = io.BytesIO()
-        img.save(image_bits, format='png', compress_level=0, optimize=False)
-        save_bytes(os.path.join(archive_root_dir, archive_fname), image_bits.getbuffer())
+        # img = PIL.Image.fromarray(img, { 1: 'L', 3: 'RGB' }[channels])
+        # image_bits = io.BytesIO()
+        # img.save(image_bits, format='png', compress_level=0, optimize=False)
+        if img.dtype == np.uint16:
+            import tifffile
+            # tifffile expects RGB, not BGR
+            image_bits = io.BytesIO()
+            tifffile.imwrite(
+                image_bits,
+                img,
+                photometric='rgb' if channels == 3 else 'minisblack',
+                compression=None
+            )
+            img_data = image_bits.getvalue()
+
+            archive_fname = archive_fname.replace('.png', '.tiff')
+        else:
+            if channels == 3:
+                img_to_save = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            else:
+                img_to_save = img
+
+            success, encoded = cv2.imencode(
+                '.png',
+                img_to_save,
+                [cv2.IMWRITE_PNG_COMPRESSION, 0]
+            )
+            if not success:
+                raise IOError(f'Failed to encode PNG: {archive_fname}')
+            img_data = encoded.tobytes()
+
+        save_bytes(os.path.join(archive_root_dir, archive_fname), img_data)
         labels.append([archive_fname, image['label']] if image['label'] is not None else None)
 
     metadata = {

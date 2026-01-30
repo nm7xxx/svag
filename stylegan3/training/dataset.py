@@ -11,16 +11,17 @@
 import os
 import numpy as np
 import zipfile
-import PIL.Image
+# import PIL.Image
+import cv2
 import json
 import torch
 import dnnlib
 
-try:
-    import pyspng
-except ImportError:
-    pyspng = None
-
+# try:
+#     import pyspng
+# except ImportError:
+#     pyspng = None
+SUPPORT_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tif', '.tiff'}
 #----------------------------------------------------------------------------
 
 class Dataset(torch.utils.data.Dataset):
@@ -88,7 +89,7 @@ class Dataset(torch.utils.data.Dataset):
         image = self._load_raw_image(self._raw_idx[idx])
         assert isinstance(image, np.ndarray)
         assert list(image.shape) == self.image_shape
-        assert image.dtype == np.uint8
+        assert image.dtype in [np.uint8, np.uint16]
         if self._xflip[idx]:
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
@@ -171,8 +172,8 @@ class ImageFolderDataset(Dataset):
         else:
             raise IOError('Path must point to a directory or zip')
 
-        PIL.Image.init()
-        self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
+        # PIL.Image.init()
+        self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in SUPPORT_EXTENSIONS)
         if len(self._image_fnames) == 0:
             raise IOError('No image files found in the specified path')
 
@@ -212,12 +213,26 @@ class ImageFolderDataset(Dataset):
     def _load_raw_image(self, raw_idx):
         fname = self._image_fnames[raw_idx]
         with self._open_file(fname) as f:
-            if pyspng is not None and self._file_ext(fname) == '.png':
-                image = pyspng.load(f.read())
-            else:
-                image = np.array(PIL.Image.open(f))
+            # if self._file_ext(fname) in ['.tif', '.tiff']:
+            #     # 16-bit tiff使用tifffile读取
+            #     image = tifffile.imread(f)
+            # elif pyspng is not None and self._file_ext(fname) == '.png':
+            #     image = pyspng.load(f.read())
+            # else:
+            #     image = np.array(PIL.Image.open(f))
+
+            data = f.read()
+        buf = np.frombuffer(data, np.uint8)
+        image = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            raise IOError(f'Failed to decode image: {fname}')
+
         if image.ndim == 2:
             image = image[:, :, np.newaxis] # HW => HWC
+        if image.shape[2] == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # BGR => RGB
+        if image.dtype not in (np.uint8, np.uint16):
+            raise ValueError(f'Unsupported dtype {image.dtype} for {fname}')  # dtype校验
         image = image.transpose(2, 0, 1) # HWC => CHW
         return image
 

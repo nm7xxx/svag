@@ -71,11 +71,15 @@ def setup_snapshot_image_grid(training_set, random_seed=0):
 #----------------------------------------------------------------------------
 
 
-def save_image_grid(img, fname, drange, grid_size):
+def save_image_grid(img, fname, drange, grid_size, flag_16_bit):
     lo, hi = drange
     img = np.asarray(img, dtype=np.float32)
-    img = (img - lo) * (255 / (hi - lo))
-    img = np.rint(img).clip(0, 255).astype(np.uint8)
+    if flag_16_bit:
+        img = (img - lo) * (65535 / (hi - lo))
+        img = np.rint(img).clip(0, 65535).astype(np.uint16)
+    else:
+        img = (img - lo) * (255 / (hi - lo))
+        img = np.rint(img).clip(0, 255).astype(np.uint8)
 
     gw, gh = grid_size
     _N, C, H, W = img.shape
@@ -84,10 +88,17 @@ def save_image_grid(img, fname, drange, grid_size):
     img = img.reshape([gh * H, gw * W, C])
 
     assert C in [1, 3]
-    if C == 1:
-        PIL.Image.fromarray(img[:, :, 0], 'L').save(fname)
-    if C == 3:
-        PIL.Image.fromarray(img, 'RGB').save(fname)
+    if flag_16_bit:
+        import tifffile as tiff
+        if C == 1:
+            tiff.imwrite(fname, img[:, :, 0])   # H×W, uint16
+        else:
+            tiff.imwrite(fname, img)             # H×W×3, uint16
+    else:
+        if C == 1:
+            PIL.Image.fromarray(img[:, :, 0], 'L').save(fname)
+        else:
+            PIL.Image.fromarray(img, 'RGB').save(fname)
 
 #----------------------------------------------------------------------------
 
@@ -152,6 +163,12 @@ def training_loop(
     training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs) # subclass of training.dataset.Dataset
     training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_gpus, seed=random_seed)
     training_set_iterator = iter(torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_gpus, **data_loader_kwargs))
+    img, _ = training_set_iterator[0]
+    print(img.dtype, img.min().item(), img.max().item())
+    if img.dtype == np.uint16:
+        flag_16_bit = True
+    else:
+        flag_16_bit = False
     if rank == 0:
         print()
         print('Num images: ', len(training_set))
@@ -269,14 +286,20 @@ def training_loop(
     grid_size = None
     grid_z = None
     grid_c = None
+    if flag_16_bit:
+        save_suffix = 'tiff'
+        drange = [0, 65535]
+    else:
+        save_suffix = 'png'
+        drange = [0, 255]
     if rank == 0:
         print('Exporting sample images...')
         grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
-        save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
+        save_image_grid(images, os.path.join(run_dir, f'reals.{save_suffix}'), drange=drange, grid_size=grid_size, flag_16_bit=flag_16_bit)
         grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
         grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
         images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-        save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
+        save_image_grid(images, os.path.join(run_dir, f'fakes_init.{save_suffix}'), drange=[-1,1], grid_size=grid_size, flag_16_bit=flag_16_bit)
 
     # Initialize logs.
     if rank == 0:
@@ -324,7 +347,10 @@ def training_loop(
         # Fetch training data.
         with torch.autograd.profiler.record_function('data_fetch'):
             phase_real_img, phase_real_c = next(training_set_iterator)
-            phase_real_img = (phase_real_img.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
+            if flag_16_bit:
+                phase_real_img = (phase_real_img.to(device).to(torch.float32) / 32767.5 - 1).split(batch_gpu)
+            else:
+                phase_real_img = (phase_real_img.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
             phase_real_c = phase_real_c.to(device).split(batch_gpu)
             all_gen_z = torch.randn([len(phases) * batch_size, G.z_dim], device=device)
             all_gen_z = [phase_gen_z.split(batch_gpu) for phase_gen_z in all_gen_z.split(batch_size)]
