@@ -21,7 +21,7 @@ import dnnlib
 #----------------------------------------------------------------------------
 
 class MetricOptions:
-    def __init__(self, G=None, G_kwargs={}, dataset_kwargs={}, num_gpus=1, rank=0, device=None, progress=None, cache=True, clean=False, ):
+    def __init__(self, G=None, G_kwargs={}, dataset_kwargs={}, num_gpus=1, rank=0, device=None, progress=None, cache=True, clean=False, is_16_bit=False):
         assert 0 <= rank < num_gpus
         self.G              = G
         self.G_kwargs       = dnnlib.EasyDict(G_kwargs)
@@ -32,6 +32,7 @@ class MetricOptions:
         self.progress       = progress.sub() if progress is not None and rank == 0 else ProgressMonitor()
         self.cache          = cache
         self.clean          = clean
+        self.is_16_bit      = is_16_bit
 
 #----------------------------------------------------------------------------
 
@@ -267,7 +268,10 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
         for _i in range(batch_size // batch_gen):
             z = torch.randn([batch_gen, G.z_dim], device=opts.device)
             img = G(z=z, c=next(c_iter), **opts.G_kwargs)
-            img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            if not opts.is_16_bit:
+                img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            else:
+                img = (img * 32767.5 + 32768).clamp(0, 65535).to(torch.uint16)
             images.append(img)
         images = torch.cat(images)
         if images.shape[1] == 1:
